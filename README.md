@@ -1,7 +1,7 @@
 # Un-async
-Suppose you have some struct (e.g. `Counter`) which is `!`[`Send`] and/or `!`[`Sync`],
+Suppose you have some struct (e.g. `Counter`) which is `!Send` and/or `!Sync`,
 but you still want to use it from an async context.
-This crate allows you to build wrappers around your type by implementing the [`UnSync`] trait,
+This crate allows you to build wrappers around your type by implementing the `UnSync` trait,
 and then sends requests and receives responses via message-passing channels internally.
 
 You can then use `UnAsync<Counter>` as a `Sync`, `Send`, and `Clone` wrapper around your
@@ -9,12 +9,12 @@ You can then use `UnAsync<Counter>` as a `Sync`, `Send`, and `Clone` wrapper aro
 All cloned `UnAsync<Counter>` will refer to the same counter.
 
 You may have to wrap a foreign type (i.e. not from your own crate) in a newtype, and then
-implmement [`UnSync`] for that instead of for the foreign type directly.
+implmement `UnSync` for that instead of for the foreign type directly.
 
 If you want fallible operations, set `type Response = Result<..., MyAwesomeErrorType>` instead.
 
 # Example
-Suppose you have the following `Counter` struct which is `!`[`Send`] and/or `!`[`Sync`]:
+Suppose you have the following `Counter` struct which is `!Send` and/or `!Sync`:
 ```rust
 struct Counter {
     // PhantomData<*const ()> to effectively impl !Send and !Sync
