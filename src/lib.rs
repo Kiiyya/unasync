@@ -1,4 +1,4 @@
-//! Un-async
+//! # Un-async
 //!
 //! Suppose you have some struct (e.g. `Counter`) which is `!`[`Send`] and/or `!`[`Sync`],
 //! but you still want to use it from an async context.
@@ -9,23 +9,35 @@
 //! `Counter`.
 //! All cloned `UnAsync<Counter>` will refer to the same counter.
 //!
+//! You may have to wrap a foreign type (i.e. not from your own crate) in a newtype, and then
+//! implmement [`UnSync`] for that instead of for the foreign type directly.
+//!
 //! # Example
+//! Suppose you have the following `Counter` struct which is `!`[`Send`] and/or `!`[`Sync`]:
 //! ```
 //! # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
 //! # use futures::future::join_all;
-//! use unasync::{UnAsync, UnSync};
-//!
 //! struct Counter {
-//!     // Private to prevent struct construction
-//!     // PhantomData<*const ()> to effectively impl !Send and !Sync on stable
+//!     // PhantomData<*const ()> to effectively impl !Send and !Sync
 //!     _private: PhantomData<*const ()>,
 //!
 //!     counter: isize,
 //! }
-//!
-//! impl Counter {
-//!     fn new() -> Self { Self { _private: PhantomData, counter: 0 } }
-//! }
+//! ```
+//! Then you implement [`UnSync`] like so, using your own `Message` enum, as follows.
+//! You *can* use an enum, but you don't have to.
+//! ```rust
+//! # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
+//! # use futures::future::join_all;
+//! # use unasync::{UnAsync, UnSync};
+//! # struct Counter {
+//! #     _private: PhantomData<*const ()>,
+//! #     counter: isize,
+//! # }
+//! # impl Counter {
+//! #     fn new() -> Self { Self { _private: PhantomData, counter: 0 } }
+//! # }
+//! use unasync::{UnAsync, UnSync};
 //!
 //! enum Message {
 //!     Get,
@@ -55,6 +67,52 @@
 //!     }
 //! }
 //! ```
+//!
+//! Then, finally, you can use `Counter` indirectly using `UnAsync<Counter>` like so:
+//! ```rust
+//! # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
+//! # use futures::future::join_all;
+//! # use unasync::{UnAsync, UnSync};
+//! # struct Counter {
+//! #     _private: PhantomData<*const ()>,
+//! #     counter: isize,
+//! # }
+//! # impl Counter {
+//! #     fn new() -> Self { Self { _private: PhantomData, counter: 0 } }
+//! # }
+//! # enum Message {
+//! #     Get,
+//! #     Add(isize),
+//! # }
+//! # impl UnSync for Counter {
+//! #     type E = Infallible; // Error type
+//! #     type Request = Message;
+//! #     type Response = isize;
+//! #     fn create() -> Result<Self, Self::E> {
+//! #         Ok(Counter::new())
+//! #     }
+//! #     fn process(&mut self, request: Self::Request) -> Self::Response {
+//! #         match request {
+//! #             Message::Get => {
+//! #                 self.counter
+//! #             },
+//! #             Message::Add(n) => {
+//! #                 self.counter += n;
+//! #                 sleep(Duration::from_millis(10)); // heavy computation
+//! #                 self.counter
+//! #             },
+//! #         }
+//! #     }
+//! # }
+//! # #[tokio::main]
+//! async fn main() {
+//!    let un = UnAsync::<Counter>::new().await.expect("Counter failed to initialize");
+//!    let response = un.query(Message::Add(12345)).await;
+//!    assert_eq!(12345, response);
+//! }
+//! ```
+//!
+//! If you want fallible operations, set `type Response = Result<..., MyAwesomeErrorType>` instead.
 
 
 use std::sync::{Arc, mpsc::{self, Receiver}};
@@ -62,13 +120,67 @@ use std::sync::{Arc, mpsc::{self, Receiver}};
 use tokio::{sync::oneshot, task::{JoinHandle, spawn_blocking}};
 
 pub trait UnSync {
+    /// Error type which may occur on creation.
     type E: Send + Sync + 'static;
+
+    /// Request type. This will commonly be an enum, for example:
+    /// ```
+    /// enum Message {
+    ///     Get,
+    ///     Add(isize),
+    /// }
+    /// ```
     type Request: Send + Sync + 'static;
+
+    /// Response type, can be anything you want.
+    ///
+    /// If you want fallible operations, set this to for example `Result<_, _>`.
     type Response: Send + Sync +  'static;
 
+    /// Function called to create [`Self`], called by [`UnAsync::new`].
+    /// If `create` fails, the error is propagated to [`UnAsync::new`].
     fn create() -> Result<Self, Self::E> where Self: Sized;
 
-    #[must_use]
+    /// Process one message. This function gets called by [`UnAsync::query`].
+    /// This function runs at most once at a time, hence you get `&mut self`.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
+    /// # use futures::future::join_all;
+    /// # use unasync::{UnAsync, UnSync};
+    /// # struct Counter {
+    /// #     _private: PhantomData<*const ()>,
+    /// #     counter: isize,
+    /// # }
+    /// # impl Counter {
+    /// #     fn new() -> Self { Self { _private: PhantomData, counter: 0 } }
+    /// # }
+    /// # enum Message {
+    /// #     Get,
+    /// #     Add(isize),
+    /// # }
+    /// # impl UnSync for Counter {
+    /// #     type E = Infallible; // Error type
+    /// #     type Request = Message;
+    /// #     type Response = isize;
+    /// #     fn create() -> Result<Self, Self::E> {
+    /// #         Ok(Counter::new())
+    /// #     }
+    /// fn process(&mut self, request: Self::Request) -> Self::Response {
+    ///     match request {
+    ///         Message::Get => {
+    ///             self.counter
+    ///         },
+    ///         Message::Add(n) => {
+    ///             self.counter += n;
+    ///             sleep(Duration::from_millis(10)); // heavy computation
+    ///             self.counter
+    ///         },
+    ///     }
+    /// }
+    /// # }
+    /// ```
     fn process(&mut self, request: Self::Request) -> Self::Response;
 }
 
@@ -86,8 +198,7 @@ pub struct UnAsync<T: UnSync> {
     sender: mpsc::Sender<Request<T::Request, T::Response>>,
 
     /// The [`JoinHandle`] of the worker thread started by tokio.
-    #[allow(clippy::type_complexity)]
-    jh: Option<Arc<JoinHandle<Result<(), T::E>>>>,
+    jh: Option<Arc<JoinHandle<()>>>,
 }
 
 impl<T: UnSync> Clone for UnAsync<T> {
@@ -100,21 +211,70 @@ impl<T: UnSync> Clone for UnAsync<T> {
 }
 
 impl<T: UnSync + 'static> UnAsync<T> {
-    pub async fn new() -> Self {
+    /// Create new `UnAsync`, by invoking `T::create`, and returning the error in case `T::create`
+    /// fails.
+    pub async fn new() -> Result<Self, T::E> {
         let (tx, rx) = std::sync::mpsc::channel();
-        // let (resp_tx, resp_rx) = oneshot::channel();
+
+        // channel where we'll transfer the error in case creation fails
+        let (init_tx, init_rx) = oneshot::channel();
 
         let mut myself = Self {
             sender: tx,
             jh: None,
         };
-        let jh = spawn_blocking(move || UnAsync::<T>::run(rx));
+        let jh = spawn_blocking(move || UnAsync::<T>::run(rx, init_tx));
         myself.jh = Some(Arc::new(jh));
+        init_rx.await.unwrap()?; // propagate error
 
-        myself
+        Ok(myself)
     }
 
     /// Sends a request to the single worker thread, and then waits on the response asynchronously.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
+    /// # use futures::future::join_all;
+    /// # use unasync::{UnAsync, UnSync};
+    /// # struct Counter {
+    /// #     _private: PhantomData<*const ()>,
+    /// #     counter: isize,
+    /// # }
+    /// # impl Counter {
+    /// #     fn new() -> Self { Self { _private: PhantomData, counter: 0 } }
+    /// # }
+    /// # enum Message {
+    /// #     Get,
+    /// #     Add(isize),
+    /// # }
+    /// # impl UnSync for Counter {
+    /// #     type E = Infallible; // Error type
+    /// #     type Request = Message;
+    /// #     type Response = isize;
+    /// #     fn create() -> Result<Self, Self::E> {
+    /// #         Ok(Counter::new())
+    /// #     }
+    /// #     fn process(&mut self, request: Self::Request) -> Self::Response {
+    /// #         match request {
+    /// #             Message::Get => {
+    /// #                 self.counter
+    /// #             },
+    /// #             Message::Add(n) => {
+    /// #                 self.counter += n;
+    /// #                 sleep(Duration::from_millis(10)); // heavy computation
+    /// #                 self.counter
+    /// #             },
+    /// #         }
+    /// #     }
+    /// # }
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// # let un = UnAsync::<Counter>::new().await.expect("Counter failed to initialize");
+    /// let response = un.query(Message::Add(12345)).await;
+    /// assert_eq!(12345, response);
+    /// # }
+    /// ```
     pub async fn query(&self, request: T::Request) -> T::Response {
         let (tx, rx) = oneshot::channel();
         let request = Request {
@@ -134,8 +294,31 @@ impl<T: UnSync + 'static> UnAsync<T> {
             .expect("The worker thread quit before responding to me. Did it panic? If not, report this unasync bug.")
     }
 
-    fn run(rx: Receiver<Request<T::Request, T::Response>>) -> Result<(), T::E> {
-        let mut instance = T::create()?;
+    fn run(rx: Receiver<Request<T::Request, T::Response>>, tx: oneshot::Sender<Result<(), T::E>>) {
+        let mut instance = match T::create() {
+            Ok(instance) => {
+                match tx.send(Ok(())) {
+                    Ok(()) => (),
+                    Err(_x) => {
+                        // the tokio task that spawned this worker thread died somehow. that's not
+                        // good. but it shouldn't be unsound. So let's just... die.
+                        return;
+                    },
+                }
+                instance
+            },
+            Err(err) => {
+                match tx.send(Err(err)) {
+                    Ok(()) => (),
+                    Err(_x) => {
+                        // the tokio task that spawned this worker thread died somehow. that's not
+                        // good. but it shouldn't be unsound. So let's just... die.
+                        return;
+                    },
+                }
+                return;
+            },
+        };
 
         // once all `Sender` halves are dropped, we will get an `Err(RecvError)`, which then
         // gracefully exits the loop
@@ -147,7 +330,6 @@ impl<T: UnSync + 'static> UnAsync<T> {
         }
 
         // println!("run: Graceful shutdown. kthxbai");
-        Ok(())
     }
 }
 
@@ -201,14 +383,14 @@ mod test {
 
     #[tokio::test]
     async fn it_works_basic() {
-        let un = UnAsync::<Counter>::new().await;
+        let un = UnAsync::<Counter>::new().await.unwrap();
 
         assert_eq!(1, un.query(Op::Add(1)).await);
     }
 
     #[tokio::test]
     async fn it_has_no_race_condition() {
-        let un = UnAsync::<Counter>::new().await;
+        let un = UnAsync::<Counter>::new().await.unwrap();
 
         const N: isize = 100;
 
@@ -220,5 +402,26 @@ mod test {
         join_all(jhs).await;
 
         assert_eq!(N, un.query(Op::Get).await);
+    }
+
+    #[derive(Debug)]
+    struct OhNo;
+
+    impl UnSync for OhNo {
+        type E = &'static str;
+        type Request = ();
+        type Response = ();
+
+        fn create() -> Result<Self, Self::E> where Self: Sized {
+            Err("Oh nooo!")
+        }
+
+        fn process(&mut self, _: Self::Request) -> Self::Response { }
+    }
+
+    #[tokio::test]
+    async fn it_propagates_errors_on_creation() {
+        let ohno = UnAsync::<OhNo>::new().await.unwrap_err();
+        assert_eq!("Oh nooo!", ohno);
     }
 }
