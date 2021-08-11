@@ -219,7 +219,7 @@ impl<T> UnAsync<T>
     ///
     /// This doesn't need to be async, since no errors can happen on creation, and the error doesn't need
     /// to be sent back.
-    pub fn new_infallible() -> Result<Self, T::E> {
+    pub fn new_infallible() -> Self {
         let (tx, rx) = crossbeam::channel::unbounded();
 
         // channel where we'll transfer the error in case creation fails
@@ -232,7 +232,7 @@ impl<T> UnAsync<T>
         let jh = spawn_blocking(move || UnAsync::<T>::run(rx, init_tx));
         myself.jh = Some(Arc::new(jh));
 
-        Ok(myself)
+        myself
     }
 }
 
