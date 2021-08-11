@@ -29,7 +29,6 @@
 //! ```rust
 //! # use std::{convert::Infallible, marker::PhantomData, thread::sleep, time::Duration};
 //! # use futures::future::join_all;
-//! # use unasync::{UnAsync, UnSync};
 //! # struct Counter {
 //! #     _private: PhantomData<*const ()>,
 //! #     counter: isize,
@@ -115,7 +114,7 @@
 //! If you want fallible operations, set `type Response = Result<..., MyAwesomeErrorType>` instead.
 
 
-use std::sync::{Arc, mpsc::{self, Receiver}};
+use std::{convert::Infallible, sync::{Arc, mpsc::{self, Receiver}}};
 
 use tokio::{sync::oneshot, task::{JoinHandle, spawn_blocking}};
 
@@ -210,6 +209,32 @@ impl<T: UnSync> Clone for UnAsync<T> {
     }
 }
 
+impl<T> UnAsync<T>
+    where
+        T: UnSync<E = Infallible> + 'static,
+{
+    /// Create new `UnAsync`, by invoking `T::create`, and returning the error in case `T::create`
+    /// fails.
+    ///
+    /// This doesn't need to be async, since no errors can happen on creation, and the error doesn't need
+    /// to be sent back.
+    pub fn new_infallible() -> Result<Self, T::E> {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // channel where we'll transfer the error in case creation fails
+        let (init_tx, _) = oneshot::channel();
+
+        let mut myself = Self {
+            sender: tx,
+            jh: None,
+        };
+        let jh = spawn_blocking(move || UnAsync::<T>::run(rx, init_tx));
+        myself.jh = Some(Arc::new(jh));
+
+        Ok(myself)
+    }
+}
+
 impl<T: UnSync + 'static> UnAsync<T> {
     /// Create new `UnAsync`, by invoking `T::create`, and returning the error in case `T::create`
     /// fails.
@@ -297,25 +322,11 @@ impl<T: UnSync + 'static> UnAsync<T> {
     fn run(rx: Receiver<Request<T::Request, T::Response>>, tx: oneshot::Sender<Result<(), T::E>>) {
         let mut instance = match T::create() {
             Ok(instance) => {
-                match tx.send(Ok(())) {
-                    Ok(()) => (),
-                    Err(_x) => {
-                        // the tokio task that spawned this worker thread died somehow. that's not
-                        // good. but it shouldn't be unsound. So let's just... die.
-                        return;
-                    },
-                }
+                let _ = tx.send(Ok(()));
                 instance
             },
             Err(err) => {
-                match tx.send(Err(err)) {
-                    Ok(()) => (),
-                    Err(_x) => {
-                        // the tokio task that spawned this worker thread died somehow. that's not
-                        // good. but it shouldn't be unsound. So let's just... die.
-                        return;
-                    },
-                }
+                let _ = tx.send(Err(err));
                 return;
             },
         };
