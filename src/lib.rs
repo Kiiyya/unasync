@@ -114,8 +114,9 @@
 //! If you want fallible operations, set `type Response = Result<..., MyAwesomeErrorType>` instead.
 
 
-use std::{convert::Infallible, sync::{Arc, mpsc::{self, Receiver}}};
+use std::{convert::Infallible, sync::Arc};
 
+use crossbeam::channel::{Receiver, Sender};
 use tokio::{sync::oneshot, task::{JoinHandle, spawn_blocking}};
 
 pub trait UnSync {
@@ -194,7 +195,7 @@ struct Request<Request: Send + Sync, Response: Send + Sync> {
 /// Uses [`Arc`] internally so can be cloned freely, and will refer to the same single object.
 #[derive(Debug)]
 pub struct UnAsync<T: UnSync> {
-    sender: mpsc::Sender<Request<T::Request, T::Response>>,
+    sender: Sender<Request<T::Request, T::Response>>,
 
     /// The [`JoinHandle`] of the worker thread started by tokio.
     jh: Option<Arc<JoinHandle<()>>>,
@@ -219,7 +220,7 @@ impl<T> UnAsync<T>
     /// This doesn't need to be async, since no errors can happen on creation, and the error doesn't need
     /// to be sent back.
     pub fn new_infallible() -> Result<Self, T::E> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crossbeam::channel::unbounded();
 
         // channel where we'll transfer the error in case creation fails
         let (init_tx, _) = oneshot::channel();
@@ -239,7 +240,7 @@ impl<T: UnSync + 'static> UnAsync<T> {
     /// Create new `UnAsync`, by invoking `T::create`, and returning the error in case `T::create`
     /// fails.
     pub async fn new() -> Result<Self, T::E> {
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = crossbeam::channel::unbounded();
 
         // channel where we'll transfer the error in case creation fails
         let (init_tx, init_rx) = oneshot::channel();
@@ -434,5 +435,10 @@ mod test {
     async fn it_propagates_errors_on_creation() {
         let ohno = UnAsync::<OhNo>::new().await.unwrap_err();
         assert_eq!("Oh nooo!", ohno);
+    }
+
+    trait Tester<T: Send + Sync> { }
+    impl Tester<UnAsync<Counter>> for () {
+
     }
 }
